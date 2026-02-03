@@ -452,21 +452,30 @@ async def poll_dialogs() -> None:
     print("[轮询] 开始检查新消息...")
     
     try:
-        async for dialog in user_client.get_dialogs():
+        dialogs = []
+        async for d in user_client.get_dialogs():
+            if d and d.chat:
+                dialogs.append(d)
+        
+        for dialog in dialogs:
             try:
-                if not dialog.chat or not hasattr(dialog.chat, 'id') or dialog.chat.id is None:
+                chat = dialog.chat
+                if not chat or not chat.id:
                     continue
                 
-                chat_id = dialog.chat.id
-                chat_type = str(dialog.chat.type) if dialog.chat.type else ""
-                
+                chat_type = str(chat.type) if hasattr(chat, 'type') and chat.type else ""
                 if "group" not in chat_type.lower():
                     continue
                 
-                async for msg in user_client.get_chat_history(chat_id, limit=5):
+                msgs = []
+                async for msg in user_client.get_chat_history(chat.id, limit=5):
                     if msg:
-                        await process_message(msg)
-            except Exception as e:
+                        msgs.append(msg)
+                
+                for msg in msgs:
+                    await process_message(msg)
+                    
+            except Exception:
                 continue
                 
     except Exception as e:
