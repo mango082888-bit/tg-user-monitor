@@ -444,42 +444,52 @@ async def process_message(message) -> None:
 
 
 async def poll_dialogs() -> None:
-    """轮询所有对话，检查新消息。"""
-    global user_client
+    """轮询规则中的群，检查新消息。"""
+    global user_client, bot_client
     if user_client is None:
         return
     
-    print("[轮询] 开始检查新消息...")
+    # 从规则中提取需要监控的群ID
+    async with DATA_LOCK:
+        data_snapshot = json.loads(json.dumps(DATA_CACHE))
     
-    try:
-        dialogs = []
-        async for d in user_client.get_dialogs():
-            if d and d.chat:
-                dialogs.append(d)
-        
-        for dialog in dialogs:
-            try:
-                chat = dialog.chat
-                if not chat or not chat.id:
-                    continue
-                
-                chat_type = str(chat.type) if hasattr(chat, 'type') and chat.type else ""
-                if "group" not in chat_type.lower():
-                    continue
-                
-                msgs = []
-                async for msg in user_client.get_chat_history(chat.id, limit=5):
-                    if msg:
-                        msgs.append(msg)
-                
-                for msg in msgs:
+    chat_ids = set()
+    for bucket in data_snapshot.get("users", {}).values():
+        for rule in bucket.get("rules", []):
+            gid = rule.get("group_id")
+            if gid is not None:
+                chat_ids.add(gid)
+    
+    # 如果有通配符规则（群=*），需要获取所有群
+    has_wildcard = any(
+        rule.get("group_id") is None 
+        for bucket in data_snapshot.get("users", {}).values() 
+        for rule in bucket.get("rules", [])
+    )
+    
+    if has_wildcard:
+        # 获取所有群（用 iter_dialogs 替代 get_dialogs）
+        try:
+            async for dialog in user_client.iter_dialogs():
+                if dialog and dialog.chat and dialog.chat.id:
+                    chat_type = str(dialog.chat.type) if dialog.chat.type else ""
+                    if "group" in chat_type.lower():
+                        chat_ids.add(dialog.chat.id)
+        except Exception as e:
+            print(f"[警告] 获取群列表失败: {e}")
+    
+    if not chat_ids:
+        return
+    
+    print(f"[轮询] 检查 {len(chat_ids)} 个群...")
+    
+    for chat_id in chat_ids:
+        try:
+            async for msg in user_client.get_chat_history(chat_id, limit=5):
+                if msg:
                     await process_message(msg)
-                    
-            except Exception:
-                continue
-                
-    except Exception as e:
-        print(f"[错误] 轮询失败: {e}")
+        except Exception:
+            continue
     
     print("[轮询] 检查完成")
 
