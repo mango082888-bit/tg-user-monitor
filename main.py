@@ -431,9 +431,12 @@ async def handle_group_message(client: Client, message):
     chat_username = message.chat.username
     if chat_username:
         group_link = f"https://t.me/{chat_username}"
+        msg_link = f"https://t.me/{chat_username}/{message.id}"
     else:
         # 私有群用 c/ 格式
-        group_link = f"https://t.me/c/{str(group_id).replace('-100', '')}"
+        chat_id_str = str(group_id).replace('-100', '')
+        group_link = f"https://t.me/c/{chat_id_str}"
+        msg_link = f"https://t.me/c/{chat_id_str}/{message.id}"
 
     for owner_id, info in matched.items():
         keywords = "、".join(sorted(info["keywords"]))
@@ -441,11 +444,12 @@ async def handle_group_message(client: Client, message):
         text = (
             f"🔔 关键词触发\n\n"
             f"👥 群：{group_name}\n"
-            f"🔗 链接：{group_link}\n"
+            f"🔗 群链接：{group_link}\n"
             f"👤 用户：{display_name}\n"
             f"🆔 ID：{sender_id}\n"
             f"🔑 关键词：{keywords}\n"
-            f"💬 消息：{content}"
+            f"💬 消息：{content}\n"
+            f"📍 直达：{msg_link}"
         )
         try:
             await bot_client.send_message(notify_target, text)
