@@ -152,8 +152,6 @@ async def cmd_watch(client: Client, message):
         if not keywords:
             await message.reply_text("请提供至少一个关键词或 *")
             return
-        await message.reply_text("请提供至少一个关键词。")
-        return
 
     owner_id = message.from_user.id
     async with DATA_LOCK:
