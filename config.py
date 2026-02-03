@@ -13,5 +13,8 @@ RULES_PATH = Path(os.getenv("RULES_PATH", "./rules.json"))
 # 日志等级
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-# 管理员白名单（逗号分隔的用户ID）
-ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+# 超级管理员（环境变量配置，不可被删除）
+SUPER_ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+
+# 动态管理员文件路径
+ADMINS_PATH = Path(os.getenv("ADMINS_PATH", "./admins.json"))

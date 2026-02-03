@@ -76,11 +76,45 @@ def _normalize_keywords(keywords: List[str]) -> List[str]:
     return result
 
 
+# 动态管理员缓存
+ADMINS_CACHE: List[int] = []
+
+
+def _load_admins() -> List[int]:
+    """加载动态管理员列表。"""
+    if not config.ADMINS_PATH.exists():
+        return []
+    try:
+        data = json.loads(config.ADMINS_PATH.read_text(encoding="utf-8"))
+        return data.get("admins", [])
+    except:
+        return []
+
+
+def _save_admins(admins: List[int]) -> None:
+    """保存动态管理员列表。"""
+    config.ADMINS_PATH.write_text(
+        json.dumps({"admins": admins}, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
+def _get_all_admins() -> List[int]:
+    """获取所有管理员（超级管理员 + 动态管理员）。"""
+    return list(set(config.SUPER_ADMIN_IDS + ADMINS_CACHE))
+
+
 def _check_admin(user_id: int) -> bool:
-    """检查用户是否在白名单中。"""
-    if not config.ADMIN_IDS:
-        return True  # 未配置白名单则允许所有人
-    return user_id in config.ADMIN_IDS
+    """检查用户是否是管理员。"""
+    all_admins = _get_all_admins()
+    if not all_admins:
+        return True  # 未配置则允许所有人
+    return user_id in all_admins
+
+
+def _is_super_admin(user_id: int) -> bool:
+    """检查是否是超级管理员。"""
+    return user_id in config.SUPER_ADMIN_IDS
 
 
 async def cmd_watch(client: Client, message):
@@ -203,6 +237,96 @@ async def cmd_notify(client: Client, message):
     await message.reply_text("通知目标已更新。")
 
 
+async def cmd_admin(client: Client, message):
+    """/admin add|del|list [用户ID]"""
+    if not message.from_user or not _is_super_admin(message.from_user.id):
+        return
+    
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply_text("用法：/admin add|del|list [用户ID]")
+        return
+    
+    action = args[1].lower()
+    global ADMINS_CACHE
+    
+    if action == "list":
+        super_admins = config.SUPER_ADMIN_IDS
+        dynamic_admins = ADMINS_CACHE
+        lines = ["👑 超级管理员："]
+        lines.extend([f"  • {uid}" for uid in super_admins] or ["  （无）"])
+        lines.append("👤 普通管理员：")
+        lines.extend([f"  • {uid}" for uid in dynamic_admins] or ["  （无）"])
+        await message.reply_text("\n".join(lines))
+        return
+    
+    if len(args) < 3:
+        await message.reply_text("请提供用户ID")
+        return
+    
+    try:
+        target_id = int(args[2])
+    except ValueError:
+        await message.reply_text("用户ID 必须是数字")
+        return
+    
+    if action == "add":
+        if target_id in config.SUPER_ADMIN_IDS:
+            await message.reply_text("该用户已是超级管理员")
+            return
+        if target_id in ADMINS_CACHE:
+            await message.reply_text("该用户已是管理员")
+            return
+        ADMINS_CACHE.append(target_id)
+        _save_admins(ADMINS_CACHE)
+        await message.reply_text(f"✅ 已添加管理员：{target_id}")
+    
+    elif action == "del":
+        if target_id in config.SUPER_ADMIN_IDS:
+            await message.reply_text("无法删除超级管理员")
+            return
+        if target_id not in ADMINS_CACHE:
+            await message.reply_text("该用户不是管理员")
+            return
+        ADMINS_CACHE.remove(target_id)
+        _save_admins(ADMINS_CACHE)
+        await message.reply_text(f"✅ 已删除管理员：{target_id}")
+    
+    else:
+        await message.reply_text("未知操作，请使用 add/del/list")
+
+
+async def cmd_help(client: Client, message):
+    """/help"""
+    if not message.from_user or not _check_admin(message.from_user.id):
+        return
+    
+    help_text = """📖 使用帮助
+
+🔍 监听管理：
+/watch 群ID 用户ID 关键词1 关键词2 ...
+  添加监听规则
+/unwatch 群ID 用户ID
+  删除监听规则
+/list
+  查看所有规则
+
+🔔 通知设置：
+/notify 目标ID
+  设置通知目标（群/用户ID）
+
+👑 管理员（仅超管）：
+/admin add 用户ID - 添加管理员
+/admin del 用户ID - 删除管理员
+/admin list - 查看管理员列表
+
+💡 提示：
+• 群ID 通常是负数，如 -1001234567
+• 用户ID 可通过 @userinfobot 获取"""
+    
+    await message.reply_text(help_text)
+
+
 async def handle_group_message(client: Client, message):
     """Userbot 监听群消息并触发通知。"""
     if not message.from_user or not message.chat:
@@ -276,8 +400,9 @@ async def main() -> None:
     if not config.USER_SESSION_STRING:
         raise SystemExit("缺少 TG_USER_SESSION_STRING 环境变量。")
 
-    global DATA_CACHE
+    global DATA_CACHE, ADMINS_CACHE
     DATA_CACHE = _load_data(config.RULES_PATH)
+    ADMINS_CACHE = _load_admins()
 
     bot = Client(
         name="bot",
@@ -300,6 +425,8 @@ async def main() -> None:
     bot.add_handler(MessageHandler(cmd_unwatch, filters.command("unwatch")))
     bot.add_handler(MessageHandler(cmd_list, filters.command("list")))
     bot.add_handler(MessageHandler(cmd_notify, filters.command("notify")))
+    bot.add_handler(MessageHandler(cmd_admin, filters.command("admin")))
+    bot.add_handler(MessageHandler(cmd_help, filters.command("help")))
 
     # 监听群消息
     user.add_handler(MessageHandler(handle_group_message, filters.group))
