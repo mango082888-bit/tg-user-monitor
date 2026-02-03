@@ -172,47 +172,33 @@ async def cmd_watch(client: Client, message):
 
 
 async def cmd_unwatch(client: Client, message):
-    """/unwatch 群ID|* 用户ID|*"""
+    """/unwatch 序号"""
     if not message.from_user or not _check_admin(message.from_user.id):
         return
     args = message.text.split()
-    if len(args) != 3:
-        await message.reply_text("用法：/unwatch 群ID|* 用户ID|*")
+    if len(args) != 2:
+        await message.reply_text("用法：/unwatch 序号\n例如：/unwatch 1")
         return
 
-    # 解析群ID
-    group_id = None
-    if args[1] != "*":
-        try:
-            group_id = int(args[1])
-        except ValueError:
-            await message.reply_text("群ID 必须是数字或 *")
-            return
-    
-    # 解析用户ID
-    user_id = None
-    if args[2] != "*":
-        try:
-            user_id = int(args[2])
-        except ValueError:
-            await message.reply_text("用户ID 必须是数字或 *")
-            return
+    try:
+        idx = int(args[1])
+    except ValueError:
+        await message.reply_text("序号必须是数字")
+        return
 
     owner_id = message.from_user.id
     async with DATA_LOCK:
         bucket = _get_user_bucket(DATA_CACHE, owner_id)
-        before = len(bucket["rules"])
-        bucket["rules"] = [r for r in bucket["rules"] if not (
-            (group_id is None or r["group_id"] == group_id) and 
-            (user_id is None or r["user_id"] == user_id)
-        )]
-        after = len(bucket["rules"])
+        if idx < 1 or idx > len(bucket["rules"]):
+            await message.reply_text(f"序号无效，当前共 {len(bucket['rules'])} 条规则")
+            return
+        removed = bucket["rules"].pop(idx - 1)
         _save_data(config.RULES_PATH, DATA_CACHE)
 
-    if before == after:
-        await message.reply_text("未找到匹配规则。")
-    else:
-        await message.reply_text("已删除规则。")
+    gid = removed['group_id'] if removed['group_id'] is not None else "*"
+    uid = removed['user_id'] if removed['user_id'] is not None else "*"
+    kws = "、".join(removed['keywords'])
+    await message.reply_text(f"✅ 已删除规则 {idx}：\n群={gid} 用户={uid} 关键词={kws}")
 
 
 async def cmd_list(client: Client, message):
@@ -335,8 +321,8 @@ async def cmd_help(client: Client, message):
 🔍 监听管理：
 /watch 群ID|* 用户ID|* 关键词|*
   添加监听规则（* 表示匹配所有）
-/unwatch 群ID|* 用户ID|*
-  删除监听规则
+/unwatch 序号
+  删除监听规则（序号从 /list 查看）
 /list
   查看所有规则
 
