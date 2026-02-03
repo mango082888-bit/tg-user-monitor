@@ -492,9 +492,11 @@ async def main() -> None:
     # 启动时同步所有群，让 Pyrogram 缓存群信息
     print("正在同步群列表...")
     try:
+        count = 0
         async for dialog in user.get_dialogs():
-            pass  # 遍历一遍让 Pyrogram 缓存
-        print("群列表同步完成")
+            if dialog.chat:
+                count += 1
+        print(f"群列表同步完成，共 {count} 个对话")
     except Exception as e:
         print(f"同步群列表失败: {e}")
 
