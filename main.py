@@ -127,7 +127,7 @@ async def cmd_watch(client: Client, message):
         return
 
     # 解析群ID（支持 * 通配符）
-    group_id = None if args[1] == "*" else None
+    group_id = None
     if args[1] != "*":
         try:
             group_id = int(args[1])
@@ -136,7 +136,7 @@ async def cmd_watch(client: Client, message):
             return
     
     # 解析用户ID（支持 * 通配符）
-    user_id = None if args[2] == "*" else None
+    user_id = None
     if args[2] != "*":
         try:
             user_id = int(args[2])
@@ -183,7 +183,7 @@ async def cmd_unwatch(client: Client, message):
         return
 
     # 解析群ID
-    group_id = None if args[1] == "*" else None
+    group_id = None
     if args[1] != "*":
         try:
             group_id = int(args[1])
@@ -192,7 +192,7 @@ async def cmd_unwatch(client: Client, message):
             return
     
     # 解析用户ID
-    user_id = None if args[2] == "*" else None
+    user_id = None
     if args[2] != "*":
         try:
             user_id = int(args[2])
