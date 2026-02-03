@@ -1,7 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Set
 
 from pyrogram import Client, filters, idle
 from pyrogram.handlers import MessageHandler
@@ -19,6 +19,11 @@ DATA_CACHE: Dict[str, Any] = {
 
 # Bot 客户端对象（在 main 中初始化）
 bot_client: Client | None = None
+user_client: Client | None = None
+
+# 已处理的消息ID缓存（避免重复通知）
+PROCESSED_MSGS: Dict[int, Set[int]] = {}  # {chat_id: {msg_id, ...}}
+MAX_PROCESSED_PER_CHAT = 1000
 
 
 def _ensure_rules_file(path: Path) -> None:
@@ -108,7 +113,7 @@ def _check_admin(user_id: int) -> bool:
     """检查用户是否是管理员。"""
     all_admins = _get_all_admins()
     if not all_admins:
-        return True  # 未配置则允许所有人
+        return True
     return user_id in all_admins
 
 
@@ -126,7 +131,6 @@ async def cmd_watch(client: Client, message):
         await message.reply_text("用法：/watch 群ID|* 用户ID|* 关键词|*\n* 表示匹配所有")
         return
 
-    # 解析群ID（支持 * 通配符）
     group_id = None
     if args[1] != "*":
         try:
@@ -135,7 +139,6 @@ async def cmd_watch(client: Client, message):
             await message.reply_text("群ID 必须是数字或 *")
             return
     
-    # 解析用户ID（支持 * 通配符）
     user_id = None
     if args[2] != "*":
         try:
@@ -144,7 +147,6 @@ async def cmd_watch(client: Client, message):
             await message.reply_text("用户ID 必须是数字或 *")
             return
 
-    # 解析关键词（支持 * 通配符）
     if args[3] == "*":
         keywords = ["*"]
     else:
@@ -156,7 +158,6 @@ async def cmd_watch(client: Client, message):
     owner_id = message.from_user.id
     async with DATA_LOCK:
         bucket = _get_user_bucket(DATA_CACHE, owner_id)
-        # 去重规则
         for rule in bucket["rules"]:
             if rule["group_id"] == group_id and rule["user_id"] == user_id and rule["keywords"] == keywords:
                 await message.reply_text("规则已存在，无需重复添加。")
@@ -168,7 +169,7 @@ async def cmd_watch(client: Client, message):
         })
         _save_data(config.RULES_PATH, DATA_CACHE)
 
-    await message.reply_text("已添加监听规则。")
+    await message.reply_text("✅ 已添加监听规则。")
 
 
 async def cmd_unwatch(client: Client, message):
@@ -249,7 +250,7 @@ async def cmd_notify(client: Client, message):
         bucket["notify_target"] = target_id
         _save_data(config.RULES_PATH, DATA_CACHE)
 
-    await message.reply_text("通知目标已更新。")
+    await message.reply_text("✅ 通知目标已更新。")
 
 
 async def cmd_admin(client: Client, message):
@@ -306,7 +307,6 @@ async def cmd_admin(client: Client, message):
         ADMINS_CACHE.remove(target_id)
         _save_admins(ADMINS_CACHE)
         await message.reply_text(f"✅ 已删除管理员：{target_id}")
-    
     else:
         await message.reply_text("未知操作，请使用 add/del/list")
 
@@ -347,25 +347,32 @@ async def cmd_help(client: Client, message):
     await message.reply_text(help_text)
 
 
-async def handle_group_message(client: Client, message):
-    """Userbot 监听群消息并触发通知。"""
-    # 调试日志
-    print(f"[DEBUG] 收到消息: chat={message.chat.id if message.chat else None}")
-    
+async def process_message(message) -> None:
+    """处理单条消息，检查是否匹配规则并发送通知。"""
     if not message.from_user or not message.chat:
         return
 
     content = message.text or message.caption
     if not content:
         return
-    
-    print(f"[DEBUG] 群={message.chat.id} 用户={message.from_user.id} 内容={content[:50]}")
 
     group_id = message.chat.id
     sender_id = message.from_user.id
+    msg_id = message.id
+    
+    # 检查是否已处理
+    if group_id not in PROCESSED_MSGS:
+        PROCESSED_MSGS[group_id] = set()
+    if msg_id in PROCESSED_MSGS[group_id]:
+        return
+    PROCESSED_MSGS[group_id].add(msg_id)
+    
+    # 清理旧消息ID
+    if len(PROCESSED_MSGS[group_id]) > MAX_PROCESSED_PER_CHAT:
+        PROCESSED_MSGS[group_id] = set(sorted(PROCESSED_MSGS[group_id])[-500:])
+
     content_lower = content.lower()
 
-    # 提前复制数据，避免持锁发送消息
     async with DATA_LOCK:
         data_snapshot = json.loads(json.dumps(DATA_CACHE))
 
@@ -375,15 +382,12 @@ async def handle_group_message(client: Client, message):
             rule_group = rule.get("group_id")
             rule_user = rule.get("user_id")
             
-            # 检查群ID匹配（None表示通配符*）
             if rule_group is not None and rule_group != group_id:
                 continue
-            # 检查用户ID匹配（None表示通配符*）
             if rule_user is not None and rule_user != sender_id:
                 continue
             
             keywords = rule.get("keywords", [])
-            # 检查关键词匹配（*表示匹配所有）
             if keywords == ["*"]:
                 hit = ["*"]
             else:
@@ -397,7 +401,7 @@ async def handle_group_message(client: Client, message):
             })
             entry["keywords"].update(hit)
 
-    if not matched:
+    if not matched or bot_client is None:
         return
 
     group_name = message.chat.title or message.chat.username or str(group_id)
@@ -410,19 +414,14 @@ async def handle_group_message(client: Client, message):
     if not display_name:
         display_name = str(sender_id)
 
-    if bot_client is None:
-        return
-
-    # 生成群链接
     chat_username = message.chat.username
     if chat_username:
         group_link = f"https://t.me/{chat_username}"
-        msg_link = f"https://t.me/{chat_username}/{message.id}"
+        msg_link = f"https://t.me/{chat_username}/{msg_id}"
     else:
-        # 私有群用 c/ 格式
         chat_id_str = str(group_id).replace('-100', '')
         group_link = f"https://t.me/c/{chat_id_str}"
-        msg_link = f"https://t.me/c/{chat_id_str}/{message.id}"
+        msg_link = f"https://t.me/c/{chat_id_str}/{msg_id}"
 
     for owner_id, info in matched.items():
         keywords = "、".join(sorted(info["keywords"]))
@@ -439,9 +438,54 @@ async def handle_group_message(client: Client, message):
         )
         try:
             await bot_client.send_message(notify_target, text)
-        except RPCError:
-            # 发送失败时不抛异常，避免阻塞后续消息
-            continue
+            print(f"[通知] 已发送通知到 {notify_target}")
+        except RPCError as e:
+            print(f"[错误] 发送通知失败: {e}")
+
+
+async def poll_dialogs() -> None:
+    """轮询所有对话，检查新消息。"""
+    global user_client
+    if user_client is None:
+        return
+    
+    print("[轮询] 开始检查新消息...")
+    
+    try:
+        # 获取所有对话
+        async for dialog in user_client.get_dialogs():
+            if not dialog.chat:
+                continue
+            
+            chat_id = dialog.chat.id
+            
+            # 只处理群组和超级群组
+            chat_type = str(dialog.chat.type)
+            if "group" not in chat_type.lower() and "supergroup" not in chat_type.lower():
+                continue
+            
+            try:
+                # 获取最近5条消息
+                async for msg in user_client.get_chat_history(chat_id, limit=5):
+                    await process_message(msg)
+            except Exception as e:
+                print(f"[错误] 获取群 {chat_id} 消息失败: {e}")
+                continue
+                
+    except Exception as e:
+        print(f"[错误] 轮询失败: {e}")
+    
+    print("[轮询] 检查完成")
+
+
+async def polling_loop() -> None:
+    """轮询循环，每10秒检查一次新消息。"""
+    while True:
+        await asyncio.sleep(10)
+        try:
+            await poll_dialogs()
+        except Exception as e:
+            print(f"[错误] 轮询循环异常: {e}")
 
 
 async def main() -> None:
@@ -452,7 +496,7 @@ async def main() -> None:
     if not config.USER_SESSION_STRING:
         raise SystemExit("缺少 TG_USER_SESSION_STRING 环境变量。")
 
-    global DATA_CACHE, ADMINS_CACHE
+    global DATA_CACHE, ADMINS_CACHE, bot_client, user_client
     DATA_CACHE = _load_data(config.RULES_PATH)
     ADMINS_CACHE = _load_admins()
 
@@ -480,29 +524,24 @@ async def main() -> None:
     bot.add_handler(MessageHandler(cmd_admin, filters.command("admin")))
     bot.add_handler(MessageHandler(cmd_help, filters.command("help")))
 
-    # 监听群消息
-    user.add_handler(MessageHandler(handle_group_message, filters.group))
-
-    global bot_client
     bot_client = bot
+    user_client = user
 
     await bot.start()
     await user.start()
 
-    # 启动时同步所有群，让 Pyrogram 缓存群信息
-    print("正在同步群列表...")
-    try:
-        count = 0
-        async for dialog in user.get_dialogs():
-            count += 1
-        print(f"群列表同步完成，共 {count} 个对话")
-    except Exception as e:
-        print(f"同步群列表失败: {e}")
-        # 即使失败也继续运行
+    print("Bot 和 Userbot 已启动。")
+    print("使用轮询模式监听消息（每10秒检查一次）...")
+    
+    # 启动轮询任务
+    polling_task = asyncio.create_task(polling_loop())
+    
+    # 首次立即轮询
+    await poll_dialogs()
 
-    print("Bot 和 Userbot 已启动。按 Ctrl+C 退出。")
     await idle()
-
+    
+    polling_task.cancel()
     await bot.stop()
     await user.stop()
 
