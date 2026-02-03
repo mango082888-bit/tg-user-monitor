@@ -363,12 +363,17 @@ async def cmd_help(client: Client, message):
 
 async def handle_group_message(client: Client, message):
     """Userbot 监听群消息并触发通知。"""
+    # 调试日志
+    print(f"[DEBUG] 收到消息: chat={message.chat.id if message.chat else None}")
+    
     if not message.from_user or not message.chat:
         return
 
     content = message.text or message.caption
     if not content:
         return
+    
+    print(f"[DEBUG] 群={message.chat.id} 用户={message.from_user.id} 内容={content[:50]}")
 
     group_id = message.chat.id
     sender_id = message.from_user.id
