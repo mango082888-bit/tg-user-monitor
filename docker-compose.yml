@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  tg-user-monitor:
+    build: .
+    container_name: tg-user-monitor
+    restart: unless-stopped
+    environment:
+      TG_API_ID: "123456"
+      TG_API_HASH: "your_api_hash"
+      TG_BOT_TOKEN: "123456:bot_token"
+      TG_USER_SESSION_STRING: "your_user_session_string"
+      RULES_PATH: "/app/rules.json"
+      LOG_LEVEL: "INFO"
+    volumes:
+      - ./rules.json:/app/rules.json
