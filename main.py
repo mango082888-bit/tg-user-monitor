@@ -484,6 +484,15 @@ async def main() -> None:
     await bot.start()
     await user.start()
 
+    # 启动时同步所有群，让 Pyrogram 缓存群信息
+    print("正在同步群列表...")
+    try:
+        async for dialog in user.get_dialogs():
+            pass  # 遍历一遍让 Pyrogram 缓存
+        print("群列表同步完成")
+    except Exception as e:
+        print(f"同步群列表失败: {e}")
+
     print("Bot 和 Userbot 已启动。按 Ctrl+C 退出。")
     await idle()
 
