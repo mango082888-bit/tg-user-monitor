@@ -452,24 +452,21 @@ async def poll_dialogs() -> None:
     print("[轮询] 开始检查新消息...")
     
     try:
-        # 获取所有对话
         async for dialog in user_client.get_dialogs():
-            if not dialog.chat:
-                continue
-            
-            chat_id = dialog.chat.id
-            
-            # 只处理群组和超级群组
-            chat_type = str(dialog.chat.type)
-            if "group" not in chat_type.lower() and "supergroup" not in chat_type.lower():
-                continue
-            
             try:
-                # 获取最近5条消息
+                if not dialog.chat or not hasattr(dialog.chat, 'id') or dialog.chat.id is None:
+                    continue
+                
+                chat_id = dialog.chat.id
+                chat_type = str(dialog.chat.type) if dialog.chat.type else ""
+                
+                if "group" not in chat_type.lower():
+                    continue
+                
                 async for msg in user_client.get_chat_history(chat_id, limit=5):
-                    await process_message(msg)
+                    if msg:
+                        await process_message(msg)
             except Exception as e:
-                print(f"[错误] 获取群 {chat_id} 消息失败: {e}")
                 continue
                 
     except Exception as e:
