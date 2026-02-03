@@ -494,8 +494,11 @@ async def main() -> None:
     try:
         count = 0
         async for dialog in user.get_dialogs():
-            if dialog.chat:
-                count += 1
+            try:
+                if dialog.chat and dialog.chat.id:
+                    count += 1
+            except:
+                pass
         print(f"群列表同步完成，共 {count} 个对话")
     except Exception as e:
         print(f"同步群列表失败: {e}")
