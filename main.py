@@ -1,40 +1,38 @@
 import asyncio
 import json
+import re
+from collections import deque
+from contextlib import suppress
 from pathlib import Path
-from typing import Dict, Any, List, Set
+from typing import Any, Deque, Dict, List, Set
 
 from pyrogram import Client, filters, idle
-from pyrogram.handlers import MessageHandler
 from pyrogram.errors import RPCError
+from pyrogram.handlers import MessageHandler
 
 import config
 
-# 全局锁，保证并发读写规则文件安全
 DATA_LOCK = asyncio.Lock()
+DATA_CACHE: Dict[str, Any] = {"users": {}}
 
-# 规则数据缓存
-DATA_CACHE: Dict[str, Any] = {
-    "users": {}
-}
-
-# Bot 客户端对象（在 main 中初始化）
 bot_client: Client | None = None
 user_client: Client | None = None
 
-# 已处理的消息ID缓存（避免重复通知）
-PROCESSED_MSGS: Dict[int, Set[int]] = {}  # {chat_id: {msg_id, ...}}
+PROCESSED_ORDER: Dict[int, Deque[int]] = {}
+PROCESSED_SEEN: Dict[int, Set[int]] = {}
 MAX_PROCESSED_PER_CHAT = 1000
+POLL_INTERVAL_SECONDS = 10
+
+ADMINS_CACHE: List[int] = []
 
 
 def _ensure_rules_file(path: Path) -> None:
-    """确保规则文件存在。"""
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"users": {}}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _load_data(path: Path) -> Dict[str, Any]:
-    """加载规则数据。"""
     _ensure_rules_file(path)
     raw = path.read_text(encoding="utf-8")
     if not raw.strip():
@@ -49,68 +47,55 @@ def _load_data(path: Path) -> Dict[str, Any]:
 
 
 def _save_data(path: Path, data: Dict[str, Any]) -> None:
-    """原子写入规则数据。"""
     tmp_path = path.with_suffix(".tmp")
     tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp_path.replace(path)
 
 
 def _get_user_bucket(data: Dict[str, Any], owner_id: int) -> Dict[str, Any]:
-    """获取某个配置者的规则桶。"""
     key = str(owner_id)
     if key not in data["users"]:
-        data["users"][key] = {
-            "notify_target": None,
-            "rules": []
-        }
+        data["users"][key] = {"notify_target": None, "rules": []}
     return data["users"][key]
 
 
 def _normalize_keywords(keywords: List[str]) -> List[str]:
-    """清理关键词，去重并保持顺序。"""
     seen = set()
     result = []
     for kw in keywords:
         kw = kw.strip()
         if not kw:
             continue
-        if kw.lower() in seen:
+        lowered = kw.lower()
+        if lowered in seen:
             continue
-        seen.add(kw.lower())
+        seen.add(lowered)
         result.append(kw)
     return result
 
 
-# 动态管理员缓存
-ADMINS_CACHE: List[int] = []
-
-
 def _load_admins() -> List[int]:
-    """加载动态管理员列表。"""
     if not config.ADMINS_PATH.exists():
         return []
     try:
         data = json.loads(config.ADMINS_PATH.read_text(encoding="utf-8"))
         return data.get("admins", [])
-    except:
+    except Exception:
         return []
 
 
 def _save_admins(admins: List[int]) -> None:
-    """保存动态管理员列表。"""
     config.ADMINS_PATH.write_text(
         json.dumps({"admins": admins}, ensure_ascii=False, indent=2),
-        encoding="utf-8"
+        encoding="utf-8",
     )
 
 
 def _get_all_admins() -> List[int]:
-    """获取所有管理员（超级管理员 + 动态管理员）。"""
     return list(set(config.SUPER_ADMIN_IDS + ADMINS_CACHE))
 
 
 def _check_admin(user_id: int) -> bool:
-    """检查用户是否是管理员。"""
     all_admins = _get_all_admins()
     if not all_admins:
         return True
@@ -118,12 +103,36 @@ def _check_admin(user_id: int) -> bool:
 
 
 def _is_super_admin(user_id: int) -> bool:
-    """检查是否是超级管理员。"""
     return user_id in config.SUPER_ADMIN_IDS
 
 
-async def cmd_watch(client: Client, message):
-    """/watch 群ID|* 用户ID|* 关键词|*"""
+def _remember_message(chat_id: int, msg_id: int) -> bool:
+    order = PROCESSED_ORDER.setdefault(chat_id, deque())
+    seen = PROCESSED_SEEN.setdefault(chat_id, set())
+    if msg_id in seen:
+        return False
+    order.append(msg_id)
+    seen.add(msg_id)
+    while len(order) > MAX_PROCESSED_PER_CHAT:
+        oldest = order.popleft()
+        seen.discard(oldest)
+    return True
+
+
+def _keyword_hit(content_lower: str, keyword: str) -> bool:
+    if keyword == "*":
+        return True
+    lowered = keyword.lower()
+    if "*" not in lowered:
+        return lowered in content_lower
+    pattern = re.escape(lowered).replace("\\*", ".*")
+    try:
+        return re.search(pattern, content_lower) is not None
+    except re.error:
+        return lowered.replace("*", "") in content_lower
+
+
+async def cmd_watch(client: Client, message) -> None:
     if not message.from_user or not _check_admin(message.from_user.id):
         return
     args = message.text.split()
@@ -138,7 +147,7 @@ async def cmd_watch(client: Client, message):
         except ValueError:
             await message.reply_text("群ID 必须是数字或 *")
             return
-    
+
     user_id = None
     if args[2] != "*":
         try:
@@ -162,18 +171,13 @@ async def cmd_watch(client: Client, message):
             if rule["group_id"] == group_id and rule["user_id"] == user_id and rule["keywords"] == keywords:
                 await message.reply_text("规则已存在，无需重复添加。")
                 return
-        bucket["rules"].append({
-            "group_id": group_id,
-            "user_id": user_id,
-            "keywords": keywords
-        })
+        bucket["rules"].append({"group_id": group_id, "user_id": user_id, "keywords": keywords})
         _save_data(config.RULES_PATH, DATA_CACHE)
 
     await message.reply_text("✅ 已添加监听规则。")
 
 
-async def cmd_unwatch(client: Client, message):
-    """/unwatch 序号"""
+async def cmd_unwatch(client: Client, message) -> None:
     if not message.from_user or not _check_admin(message.from_user.id):
         return
     args = message.text.split()
@@ -196,14 +200,13 @@ async def cmd_unwatch(client: Client, message):
         removed = bucket["rules"].pop(idx - 1)
         _save_data(config.RULES_PATH, DATA_CACHE)
 
-    gid = removed['group_id'] if removed['group_id'] is not None else "*"
-    uid = removed['user_id'] if removed['user_id'] is not None else "*"
-    kws = "、".join(removed['keywords'])
+    gid = removed["group_id"] if removed["group_id"] is not None else "*"
+    uid = removed["user_id"] if removed["user_id"] is not None else "*"
+    kws = "、".join(removed["keywords"])
     await message.reply_text(f"✅ 已删除规则 {idx}：\n群={gid} 用户={uid} 关键词={kws}")
 
 
-async def cmd_list(client: Client, message):
-    """/list"""
+async def cmd_list(client: Client, message) -> None:
     if not message.from_user or not _check_admin(message.from_user.id):
         return
     owner_id = message.from_user.id
@@ -219,8 +222,8 @@ async def cmd_list(client: Client, message):
     lines = ["当前规则："]
     for idx, rule in enumerate(rules, start=1):
         kws = "、".join(rule["keywords"]) if rule["keywords"] != ["*"] else "*"
-        gid = rule['group_id'] if rule['group_id'] is not None else "*"
-        uid = rule['user_id'] if rule['user_id'] is not None else "*"
+        gid = rule["group_id"] if rule["group_id"] is not None else "*"
+        uid = rule["user_id"] if rule["user_id"] is not None else "*"
         lines.append(f"{idx}. 群={gid} 用户={uid} 关键词={kws}")
     if notify_target:
         lines.append(f"通知目标：{notify_target}")
@@ -229,8 +232,7 @@ async def cmd_list(client: Client, message):
     await message.reply_text("\n".join(lines))
 
 
-async def cmd_notify(client: Client, message):
-    """/notify 目标ID"""
+async def cmd_notify(client: Client, message) -> None:
     if not message.from_user or not _check_admin(message.from_user.id):
         return
     args = message.text.split()
@@ -253,19 +255,18 @@ async def cmd_notify(client: Client, message):
     await message.reply_text("✅ 通知目标已更新。")
 
 
-async def cmd_admin(client: Client, message):
-    """/admin add|del|list [用户ID]"""
+async def cmd_admin(client: Client, message) -> None:
     if not message.from_user or not _is_super_admin(message.from_user.id):
         return
-    
+
     args = message.text.split()
     if len(args) < 2:
         await message.reply_text("用法：/admin add|del|list [用户ID]")
         return
-    
+
     action = args[1].lower()
     global ADMINS_CACHE
-    
+
     if action == "list":
         super_admins = config.SUPER_ADMIN_IDS
         dynamic_admins = ADMINS_CACHE
@@ -275,17 +276,17 @@ async def cmd_admin(client: Client, message):
         lines.extend([f"  • {uid}" for uid in dynamic_admins] or ["  （无）"])
         await message.reply_text("\n".join(lines))
         return
-    
+
     if len(args) < 3:
         await message.reply_text("请提供用户ID")
         return
-    
+
     try:
         target_id = int(args[2])
     except ValueError:
         await message.reply_text("用户ID 必须是数字")
         return
-    
+
     if action == "add":
         if target_id in config.SUPER_ADMIN_IDS:
             await message.reply_text("该用户已是超级管理员")
@@ -296,7 +297,6 @@ async def cmd_admin(client: Client, message):
         ADMINS_CACHE.append(target_id)
         _save_admins(ADMINS_CACHE)
         await message.reply_text(f"✅ 已添加管理员：{target_id}")
-    
     elif action == "del":
         if target_id in config.SUPER_ADMIN_IDS:
             await message.reply_text("无法删除超级管理员")
@@ -311,11 +311,10 @@ async def cmd_admin(client: Client, message):
         await message.reply_text("未知操作，请使用 add/del/list")
 
 
-async def cmd_help(client: Client, message):
-    """/help"""
+async def cmd_help(client: Client, message) -> None:
     if not message.from_user or not _check_admin(message.from_user.id):
         return
-    
+
     help_text = """📖 使用帮助
 
 🔍 监听管理：
@@ -343,12 +342,11 @@ async def cmd_help(client: Client, message):
 💡 提示：
 • 群ID 通常是负数，如 -1001234567
 • 用户ID 可通过 @userinfobot 获取"""
-    
+
     await message.reply_text(help_text)
 
 
 async def process_message(message) -> None:
-    """处理单条消息，检查是否匹配规则并发送通知。"""
     if not message.from_user or not message.chat:
         return
 
@@ -359,17 +357,9 @@ async def process_message(message) -> None:
     group_id = message.chat.id
     sender_id = message.from_user.id
     msg_id = message.id
-    
-    # 检查是否已处理
-    if group_id not in PROCESSED_MSGS:
-        PROCESSED_MSGS[group_id] = set()
-    if msg_id in PROCESSED_MSGS[group_id]:
+
+    if not _remember_message(group_id, msg_id):
         return
-    PROCESSED_MSGS[group_id].add(msg_id)
-    
-    # 清理旧消息ID
-    if len(PROCESSED_MSGS[group_id]) > MAX_PROCESSED_PER_CHAT:
-        PROCESSED_MSGS[group_id] = set(sorted(PROCESSED_MSGS[group_id])[-500:])
 
     content_lower = content.lower()
 
@@ -381,24 +371,21 @@ async def process_message(message) -> None:
         for rule in bucket.get("rules", []):
             rule_group = rule.get("group_id")
             rule_user = rule.get("user_id")
-            
+
             if rule_group is not None and rule_group != group_id:
                 continue
             if rule_user is not None and rule_user != sender_id:
                 continue
-            
+
             keywords = rule.get("keywords", [])
             if keywords == ["*"]:
                 hit = ["*"]
             else:
-                hit = [kw for kw in keywords if kw.lower() in content_lower]
+                hit = [kw for kw in keywords if _keyword_hit(content_lower, kw)]
                 if not hit:
                     continue
-            
-            entry = matched.setdefault(owner_id, {
-                "keywords": set(),
-                "notify_target": bucket.get("notify_target")
-            })
+
+            entry = matched.setdefault(owner_id, {"keywords": set(), "notify_target": bucket.get("notify_target")})
             entry["keywords"].update(hit)
 
     if not matched or bot_client is None:
@@ -419,7 +406,7 @@ async def process_message(message) -> None:
         group_link = f"https://t.me/{chat_username}"
         msg_link = f"https://t.me/{chat_username}/{msg_id}"
     else:
-        chat_id_str = str(group_id).replace('-100', '')
+        chat_id_str = str(group_id).replace("-100", "")
         group_link = f"https://t.me/c/{chat_id_str}"
         msg_link = f"https://t.me/c/{chat_id_str}/{msg_id}"
 
@@ -427,7 +414,7 @@ async def process_message(message) -> None:
         keywords = "、".join(sorted(info["keywords"]))
         notify_target = info.get("notify_target") or int(owner_id)
         text = (
-            f"🔔 关键词触发\n\n"
+            "🔔 关键词触发\n\n"
             f"👥 群：{group_name}\n"
             f"🔗 群链接：{group_link}\n"
             f"👤 用户：{display_name}\n"
@@ -439,69 +426,53 @@ async def process_message(message) -> None:
         try:
             await bot_client.send_message(notify_target, text)
             print(f"[通知] 已发送通知到 {notify_target}")
-        except RPCError as e:
-            print(f"[错误] 发送通知失败: {e}")
+        except RPCError as exc:
+            print(f"[错误] 发送通知失败: {exc}")
+
+
+async def on_user_message(client: Client, message) -> None:
+    await process_message(message)
 
 
 async def poll_dialogs() -> None:
-    """轮询规则中的群，检查新消息。"""
-    global user_client, bot_client
+    global user_client
     if user_client is None:
         return
-    
-    # 从规则中提取需要监控的群ID
+
     async with DATA_LOCK:
         data_snapshot = json.loads(json.dumps(DATA_CACHE))
-    
-    chat_ids = set()
+
+    chat_ids: Set[int] = set()
     for bucket in data_snapshot.get("users", {}).values():
         for rule in bucket.get("rules", []):
             gid = rule.get("group_id")
             if gid is not None:
                 chat_ids.add(gid)
-    
-    # 如果有通配符规则（群=*），需要获取所有群
-    has_wildcard = any(
-        rule.get("group_id") is None 
-        for bucket in data_snapshot.get("users", {}).values() 
-        for rule in bucket.get("rules", [])
-    )
-    
-    if has_wildcard:
-        # 获取所有群（用 iter_dialogs 替代 get_dialogs）
-        try:
-            async for dialog in user_client.iter_dialogs():
-                if dialog and dialog.chat and dialog.chat.id:
-                    chat_type = str(dialog.chat.type) if dialog.chat.type else ""
-                    if "group" in chat_type.lower():
-                        chat_ids.add(dialog.chat.id)
-        except Exception as e:
-            print(f"[警告] 获取群列表失败: {e}")
-    
+
     if not chat_ids:
         return
-    
+
     print(f"[轮询] 检查 {len(chat_ids)} 个群...")
-    
+
     for chat_id in chat_ids:
         try:
-            async for msg in user_client.get_chat_history(chat_id, limit=5):
+            messages = [msg async for msg in user_client.get_chat_history(chat_id, limit=5)]
+            for msg in reversed(messages):
                 if msg:
                     await process_message(msg)
         except Exception:
-            continue
-    
+            print(f"[警告] 群 {chat_id} 获取失败")
+
     print("[轮询] 检查完成")
 
 
 async def polling_loop() -> None:
-    """轮询循环，每10秒检查一次新消息。"""
     while True:
-        await asyncio.sleep(10)
         try:
             await poll_dialogs()
-        except Exception as e:
-            print(f"[错误] 轮询循环异常: {e}")
+        except Exception as exc:
+            print(f"[错误] 轮询循环异常: {exc}")
+        await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
 
 async def main() -> None:
@@ -521,7 +492,7 @@ async def main() -> None:
         api_id=config.API_ID,
         api_hash=config.API_HASH,
         bot_token=config.BOT_TOKEN,
-        workdir="./"
+        workdir="./",
     )
 
     user = Client(
@@ -529,16 +500,17 @@ async def main() -> None:
         api_id=config.API_ID,
         api_hash=config.API_HASH,
         session_string=config.USER_SESSION_STRING,
-        workdir="./"
+        workdir="./",
     )
 
-    # 绑定命令处理
     bot.add_handler(MessageHandler(cmd_watch, filters.command("watch")))
     bot.add_handler(MessageHandler(cmd_unwatch, filters.command("unwatch")))
     bot.add_handler(MessageHandler(cmd_list, filters.command("list")))
     bot.add_handler(MessageHandler(cmd_notify, filters.command("notify")))
     bot.add_handler(MessageHandler(cmd_admin, filters.command("admin")))
     bot.add_handler(MessageHandler(cmd_help, filters.command("help")))
+
+    user.add_handler(MessageHandler(on_user_message, filters.incoming))
 
     bot_client = bot
     user_client = user
@@ -547,17 +519,15 @@ async def main() -> None:
     await user.start()
 
     print("Bot 和 Userbot 已启动。")
-    print("使用轮询模式监听消息（每10秒检查一次）...")
-    
-    # 启动轮询任务
+    print(f"使用轮询模式监听消息（每{POLL_INTERVAL_SECONDS}秒检查一次）...")
+
     polling_task = asyncio.create_task(polling_loop())
-    
-    # 首次立即轮询
-    await poll_dialogs()
 
     await idle()
-    
+
     polling_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await polling_task
     await bot.stop()
     await user.stop()
 
