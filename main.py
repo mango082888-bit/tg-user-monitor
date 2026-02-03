@@ -118,25 +118,40 @@ def _is_super_admin(user_id: int) -> bool:
 
 
 async def cmd_watch(client: Client, message):
-    """/watch 群ID 用户ID 关键词..."""
+    """/watch 群ID|* 用户ID|* 关键词|*"""
     if not message.from_user or not _check_admin(message.from_user.id):
-        return
-    if not message.from_user:
         return
     args = message.text.split()
     if len(args) < 4:
-        await message.reply_text("用法：/watch 群ID 用户ID 关键词1 关键词2 ...")
+        await message.reply_text("用法：/watch 群ID|* 用户ID|* 关键词|*\n* 表示匹配所有")
         return
 
-    try:
-        group_id = int(args[1])
-        user_id = int(args[2])
-    except ValueError:
-        await message.reply_text("群ID 和 用户ID 必须是数字。")
-        return
+    # 解析群ID（支持 * 通配符）
+    group_id = None if args[1] == "*" else None
+    if args[1] != "*":
+        try:
+            group_id = int(args[1])
+        except ValueError:
+            await message.reply_text("群ID 必须是数字或 *")
+            return
+    
+    # 解析用户ID（支持 * 通配符）
+    user_id = None if args[2] == "*" else None
+    if args[2] != "*":
+        try:
+            user_id = int(args[2])
+        except ValueError:
+            await message.reply_text("用户ID 必须是数字或 *")
+            return
 
-    keywords = _normalize_keywords(args[3:])
-    if not keywords:
+    # 解析关键词（支持 * 通配符）
+    if args[3] == "*":
+        keywords = ["*"]
+    else:
+        keywords = _normalize_keywords(args[3:])
+        if not keywords:
+            await message.reply_text("请提供至少一个关键词或 *")
+            return
         await message.reply_text("请提供至少一个关键词。")
         return
 
@@ -159,26 +174,40 @@ async def cmd_watch(client: Client, message):
 
 
 async def cmd_unwatch(client: Client, message):
-    """/unwatch 群ID 用户ID"""
+    """/unwatch 群ID|* 用户ID|*"""
     if not message.from_user or not _check_admin(message.from_user.id):
         return
     args = message.text.split()
     if len(args) != 3:
-        await message.reply_text("用法：/unwatch 群ID 用户ID")
+        await message.reply_text("用法：/unwatch 群ID|* 用户ID|*")
         return
 
-    try:
-        group_id = int(args[1])
-        user_id = int(args[2])
-    except ValueError:
-        await message.reply_text("群ID 和 用户ID 必须是数字。")
-        return
+    # 解析群ID
+    group_id = None if args[1] == "*" else None
+    if args[1] != "*":
+        try:
+            group_id = int(args[1])
+        except ValueError:
+            await message.reply_text("群ID 必须是数字或 *")
+            return
+    
+    # 解析用户ID
+    user_id = None if args[2] == "*" else None
+    if args[2] != "*":
+        try:
+            user_id = int(args[2])
+        except ValueError:
+            await message.reply_text("用户ID 必须是数字或 *")
+            return
 
     owner_id = message.from_user.id
     async with DATA_LOCK:
         bucket = _get_user_bucket(DATA_CACHE, owner_id)
         before = len(bucket["rules"])
-        bucket["rules"] = [r for r in bucket["rules"] if not (r["group_id"] == group_id and r["user_id"] == user_id)]
+        bucket["rules"] = [r for r in bucket["rules"] if not (
+            (group_id is None or r["group_id"] == group_id) and 
+            (user_id is None or r["user_id"] == user_id)
+        )]
         after = len(bucket["rules"])
         _save_data(config.RULES_PATH, DATA_CACHE)
 
@@ -204,8 +233,10 @@ async def cmd_list(client: Client, message):
 
     lines = ["当前规则："]
     for idx, rule in enumerate(rules, start=1):
-        kws = "、".join(rule["keywords"])
-        lines.append(f"{idx}. 群ID={rule['group_id']} 用户ID={rule['user_id']} 关键词={kws}")
+        kws = "、".join(rule["keywords"]) if rule["keywords"] != ["*"] else "*"
+        gid = rule['group_id'] if rule['group_id'] is not None else "*"
+        uid = rule['user_id'] if rule['user_id'] is not None else "*"
+        lines.append(f"{idx}. 群={gid} 用户={uid} 关键词={kws}")
     if notify_target:
         lines.append(f"通知目标：{notify_target}")
     else:
@@ -304,12 +335,17 @@ async def cmd_help(client: Client, message):
     help_text = """📖 使用帮助
 
 🔍 监听管理：
-/watch 群ID 用户ID 关键词1 关键词2 ...
-  添加监听规则
-/unwatch 群ID 用户ID
+/watch 群ID|* 用户ID|* 关键词|*
+  添加监听规则（* 表示匹配所有）
+/unwatch 群ID|* 用户ID|*
   删除监听规则
 /list
   查看所有规则
+
+📌 示例：
+/watch * 123456 * - 监控用户在所有群的所有消息
+/watch -100123 * 出售 - 监控某群所有人说"出售"
+/watch -100123 123456 三折 - 精确监控
 
 🔔 通知设置：
 /notify 目标ID
@@ -347,12 +383,25 @@ async def handle_group_message(client: Client, message):
     matched: Dict[str, Dict[str, Any]] = {}
     for owner_id, bucket in data_snapshot.get("users", {}).items():
         for rule in bucket.get("rules", []):
-            if rule.get("group_id") != group_id or rule.get("user_id") != sender_id:
+            rule_group = rule.get("group_id")
+            rule_user = rule.get("user_id")
+            
+            # 检查群ID匹配（None表示通配符*）
+            if rule_group is not None and rule_group != group_id:
                 continue
+            # 检查用户ID匹配（None表示通配符*）
+            if rule_user is not None and rule_user != sender_id:
+                continue
+            
             keywords = rule.get("keywords", [])
-            hit = [kw for kw in keywords if kw.lower() in content_lower]
-            if not hit:
-                continue
+            # 检查关键词匹配（*表示匹配所有）
+            if keywords == ["*"]:
+                hit = ["*"]
+            else:
+                hit = [kw for kw in keywords if kw.lower() in content_lower]
+                if not hit:
+                    continue
+            
             entry = matched.setdefault(owner_id, {
                 "keywords": set(),
                 "notify_target": bucket.get("notify_target")
