@@ -76,8 +76,17 @@ def _normalize_keywords(keywords: List[str]) -> List[str]:
     return result
 
 
+def _check_admin(user_id: int) -> bool:
+    """检查用户是否在白名单中。"""
+    if not config.ADMIN_IDS:
+        return True  # 未配置白名单则允许所有人
+    return user_id in config.ADMIN_IDS
+
+
 async def cmd_watch(client: Client, message):
     """/watch 群ID 用户ID 关键词..."""
+    if not message.from_user or not _check_admin(message.from_user.id):
+        return
     if not message.from_user:
         return
     args = message.text.split()
@@ -117,7 +126,7 @@ async def cmd_watch(client: Client, message):
 
 async def cmd_unwatch(client: Client, message):
     """/unwatch 群ID 用户ID"""
-    if not message.from_user:
+    if not message.from_user or not _check_admin(message.from_user.id):
         return
     args = message.text.split()
     if len(args) != 3:
@@ -147,7 +156,7 @@ async def cmd_unwatch(client: Client, message):
 
 async def cmd_list(client: Client, message):
     """/list"""
-    if not message.from_user:
+    if not message.from_user or not _check_admin(message.from_user.id):
         return
     owner_id = message.from_user.id
     async with DATA_LOCK:
@@ -172,7 +181,7 @@ async def cmd_list(client: Client, message):
 
 async def cmd_notify(client: Client, message):
     """/notify 目标ID"""
-    if not message.from_user:
+    if not message.from_user or not _check_admin(message.from_user.id):
         return
     args = message.text.split()
     if len(args) != 2:
