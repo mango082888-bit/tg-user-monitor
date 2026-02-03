@@ -427,15 +427,25 @@ async def handle_group_message(client: Client, message):
     if bot_client is None:
         return
 
+    # 生成群链接
+    chat_username = message.chat.username
+    if chat_username:
+        group_link = f"https://t.me/{chat_username}"
+    else:
+        # 私有群用 c/ 格式
+        group_link = f"https://t.me/c/{str(group_id).replace('-100', '')}"
+
     for owner_id, info in matched.items():
         keywords = "、".join(sorted(info["keywords"]))
         notify_target = info.get("notify_target") or int(owner_id)
         text = (
-            f"群名：{group_name}\n"
-            f"用户名：{display_name}\n"
-            f"用户ID：{sender_id}\n"
-            f"关键词：{keywords}\n"
-            f"消息内容：{content}"
+            f"🔔 关键词触发\n\n"
+            f"👥 群：{group_name}\n"
+            f"🔗 链接：{group_link}\n"
+            f"👤 用户：{display_name}\n"
+            f"🆔 ID：{sender_id}\n"
+            f"🔑 关键词：{keywords}\n"
+            f"💬 消息：{content}"
         )
         try:
             await bot_client.send_message(notify_target, text)
