@@ -494,14 +494,11 @@ async def main() -> None:
     try:
         count = 0
         async for dialog in user.get_dialogs():
-            try:
-                if dialog.chat and dialog.chat.id:
-                    count += 1
-            except:
-                pass
+            count += 1
         print(f"群列表同步完成，共 {count} 个对话")
     except Exception as e:
         print(f"同步群列表失败: {e}")
+        # 即使失败也继续运行
 
     print("Bot 和 Userbot 已启动。按 Ctrl+C 退出。")
     await idle()
