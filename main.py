@@ -486,7 +486,7 @@ async def process_message(message) -> None:
             notify_targets = [int(owner_id)]  # 默认发给自己
         
         text = (
-            "🔔 小舔狗来报\n\n"
+            "🔔 消息提醒\n\n"
             f"👥 群：{group_name}\n"
             f"👤 用户：{display_name}\n"
             f"🆔 ID：{sender_id}\n"
