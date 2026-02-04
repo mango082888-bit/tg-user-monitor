@@ -479,15 +479,15 @@ async def process_message(message) -> None:
         msg_link = f"https://t.me/c/{chat_id_str}/{msg_id}"
 
     for owner_id, info in matched.items():
-        keywords = "、".join(sorted(info["keywords"]))
+        keywords_raw = "、".join(sorted(info["keywords"]))
+        keywords = "全部" if keywords_raw == "*" else keywords_raw
         notify_targets = info.get("notify_targets", [])
         if not notify_targets:
             notify_targets = [int(owner_id)]  # 默认发给自己
         
         text = (
-            "🔔 关键词触发\n\n"
+            "🔔 小舔狗来报\n\n"
             f"👥 群：{group_name}\n"
-            f"🔗 群链接：{group_link}\n"
             f"👤 用户：{display_name}\n"
             f"🆔 ID：{sender_id}\n"
             f"🔑 关键词：{keywords}\n"
