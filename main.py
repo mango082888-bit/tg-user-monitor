@@ -55,8 +55,15 @@ def _save_data(path: Path, data: Dict[str, Any]) -> None:
 def _get_user_bucket(data: Dict[str, Any], owner_id: int) -> Dict[str, Any]:
     key = str(owner_id)
     if key not in data["users"]:
-        data["users"][key] = {"notify_target": None, "rules": []}
-    return data["users"][key]
+        data["users"][key] = {"notify_targets": [], "rules": []}
+    # 兼容旧数据：单个 notify_target 转为列表
+    bucket = data["users"][key]
+    if "notify_target" in bucket and "notify_targets" not in bucket:
+        old_target = bucket.pop("notify_target")
+        bucket["notify_targets"] = [old_target] if old_target else []
+    if "notify_targets" not in bucket:
+        bucket["notify_targets"] = []
+    return bucket
 
 
 def _normalize_keywords(keywords: List[str]) -> List[str]:
@@ -213,7 +220,7 @@ async def cmd_list(client: Client, message) -> None:
     async with DATA_LOCK:
         bucket = _get_user_bucket(DATA_CACHE, owner_id)
         rules = list(bucket["rules"])
-        notify_target = bucket.get("notify_target")
+        notify_targets = bucket.get("notify_targets", [])
 
     if not rules:
         await message.reply_text("当前没有任何规则。")
@@ -225,8 +232,9 @@ async def cmd_list(client: Client, message) -> None:
         gid = rule["group_id"] if rule["group_id"] is not None else "*"
         uid = rule["user_id"] if rule["user_id"] is not None else "*"
         lines.append(f"{idx}. 群={gid} 用户={uid} 关键词={kws}")
-    if notify_target:
-        lines.append(f"通知目标：{notify_target}")
+    notify_targets = bucket.get("notify_targets", [])
+    if notify_targets:
+        lines.append(f"通知目标：{', '.join(str(t) for t in notify_targets)}")
     else:
         lines.append("通知目标：未设置（默认发送给你）")
     await message.reply_text("\n".join(lines))
@@ -236,23 +244,81 @@ async def cmd_notify(client: Client, message) -> None:
     if not message.from_user or not _check_admin(message.from_user.id):
         return
     args = message.text.split()
-    if len(args) != 2:
-        await message.reply_text("用法：/notify 目标ID")
+    if len(args) < 2:
+        await message.reply_text("用法：\n/notify add 目标ID - 添加通知目标\n/notify del 目标ID - 删除通知目标\n/notify list - 查看所有通知目标\n/notify clear - 清空所有通知目标")
         return
 
-    try:
-        target_id = int(args[1])
-    except ValueError:
-        await message.reply_text("目标ID 必须是数字。")
-        return
-
+    action = args[1].lower()
     owner_id = message.from_user.id
-    async with DATA_LOCK:
-        bucket = _get_user_bucket(DATA_CACHE, owner_id)
-        bucket["notify_target"] = target_id
-        _save_data(config.RULES_PATH, DATA_CACHE)
 
-    await message.reply_text("✅ 通知目标已更新。")
+    if action == "list":
+        async with DATA_LOCK:
+            bucket = _get_user_bucket(DATA_CACHE, owner_id)
+            targets = bucket.get("notify_targets", [])
+        if not targets:
+            await message.reply_text("当前没有设置通知目标（默认发送给你）")
+        else:
+            lines = ["📌 当前通知目标："]
+            for i, t in enumerate(targets, 1):
+                lines.append(f"  {i}. {t}")
+            await message.reply_text("\n".join(lines))
+        return
+
+    if action == "clear":
+        async with DATA_LOCK:
+            bucket = _get_user_bucket(DATA_CACHE, owner_id)
+            bucket["notify_targets"] = []
+            _save_data(config.RULES_PATH, DATA_CACHE)
+        await message.reply_text("✅ 已清空所有通知目标。")
+        return
+
+    if action in ("add", "del") and len(args) < 3:
+        await message.reply_text(f"用法：/notify {action} 目标ID")
+        return
+
+    if action == "add":
+        try:
+            target_id = int(args[2])
+        except ValueError:
+            await message.reply_text("目标ID 必须是数字。")
+            return
+        async with DATA_LOCK:
+            bucket = _get_user_bucket(DATA_CACHE, owner_id)
+            if target_id in bucket["notify_targets"]:
+                await message.reply_text("该目标已存在。")
+                return
+            bucket["notify_targets"].append(target_id)
+            _save_data(config.RULES_PATH, DATA_CACHE)
+        await message.reply_text(f"✅ 已添加通知目标：{target_id}")
+
+    elif action == "del":
+        try:
+            target_id = int(args[2])
+        except ValueError:
+            await message.reply_text("目标ID 必须是数字。")
+            return
+        async with DATA_LOCK:
+            bucket = _get_user_bucket(DATA_CACHE, owner_id)
+            if target_id not in bucket["notify_targets"]:
+                await message.reply_text("该目标不存在。")
+                return
+            bucket["notify_targets"].remove(target_id)
+            _save_data(config.RULES_PATH, DATA_CACHE)
+        await message.reply_text(f"✅ 已删除通知目标：{target_id}")
+
+    else:
+        # 兼容旧用法：/notify 目标ID 直接添加
+        try:
+            target_id = int(args[1])
+        except ValueError:
+            await message.reply_text("未知操作，请使用 add/del/list/clear")
+            return
+        async with DATA_LOCK:
+            bucket = _get_user_bucket(DATA_CACHE, owner_id)
+            if target_id not in bucket["notify_targets"]:
+                bucket["notify_targets"].append(target_id)
+            _save_data(config.RULES_PATH, DATA_CACHE)
+        await message.reply_text(f"✅ 已添加通知目标：{target_id}")
 
 
 async def cmd_admin(client: Client, message) -> None:
@@ -331,8 +397,10 @@ async def cmd_help(client: Client, message) -> None:
 /watch -100123 123456 三折 - 精确监控
 
 🔔 通知设置：
-/notify 目标ID
-  设置通知目标（群/用户ID）
+/notify add 目标ID - 添加通知目标
+/notify del 目标ID - 删除通知目标
+/notify list - 查看所有通知目标
+/notify clear - 清空所有通知目标
 
 👑 管理员（仅超管）：
 /admin add 用户ID - 添加管理员
@@ -385,7 +453,7 @@ async def process_message(message) -> None:
                 if not hit:
                     continue
 
-            entry = matched.setdefault(owner_id, {"keywords": set(), "notify_target": bucket.get("notify_target")})
+            entry = matched.setdefault(owner_id, {"keywords": set(), "notify_targets": bucket.get("notify_targets", [])})
             entry["keywords"].update(hit)
 
     if not matched or bot_client is None:
@@ -412,7 +480,10 @@ async def process_message(message) -> None:
 
     for owner_id, info in matched.items():
         keywords = "、".join(sorted(info["keywords"]))
-        notify_target = info.get("notify_target") or int(owner_id)
+        notify_targets = info.get("notify_targets", [])
+        if not notify_targets:
+            notify_targets = [int(owner_id)]  # 默认发给自己
+        
         text = (
             "🔔 关键词触发\n\n"
             f"👥 群：{group_name}\n"
@@ -423,11 +494,13 @@ async def process_message(message) -> None:
             f"💬 消息：{content}\n"
             f"📍 直达：{msg_link}"
         )
-        try:
-            await bot_client.send_message(notify_target, text)
-            print(f"[通知] 已发送通知到 {notify_target}")
-        except RPCError as exc:
-            print(f"[错误] 发送通知失败: {exc}")
+        
+        for notify_target in notify_targets:
+            try:
+                await bot_client.send_message(notify_target, text)
+                print(f"[通知] 已发送通知到 {notify_target}")
+            except RPCError as exc:
+                print(f"[错误] 发送通知到 {notify_target} 失败: {exc}")
 
 
 async def on_user_message(client: Client, message) -> None:
